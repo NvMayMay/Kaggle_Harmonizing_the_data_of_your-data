@@ -1,0 +1,34 @@
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+
+# Large/intermediate submission files (keep only best)
+submission.csv
+submission1.csv
+submission_optimal.csv
+submission_v2.csv
+submission_v3.csv
+submission_v4.csv
+submission_v5.csv
+submission_v6_notavail.csv
+submission_v7.csv
+submission_v7b.csv
+submission_v8.csv
+test_pxd004010.csv
+eval_full_5pxd.csv
+analysis_output.txt
+
+# Intermediate analysis scripts
+analyze_submission.py
+check_quality.py
+compare_coverage.py
+create_optimal_submission.py
+diagnose.py
+
+# Handover docs (internal)
+CLAUDE_CODE_HANDOVER.md
+
+# Legacy pipelines (superseded by pipeline_merged.py)
+pipeline.py
+langgraph_deliberation.py

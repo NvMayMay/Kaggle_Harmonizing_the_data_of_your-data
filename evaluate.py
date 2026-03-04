@@ -449,16 +449,164 @@ def run_full_evaluation(data_dir: str, num_pxds: int = 5, models: list = None):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSE MODE: Detailed per-column F1 analysis with value diffs
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def run_diagnose(data_dir: str, num_pxds: int = 5, models: list = None, ensemble: int = 1):
+    """Run pipeline on training PXDs, score locally, show detailed value diffs.
+
+    Selects diverse training PXDs (different organisms, instruments, labels)
+    to maximize diagnostic coverage.
+    """
+    from pipeline_merged import run_pipeline, SUBMISSION_COLS
+    from scoring import load_sdrf
+
+    pxd_files = load_all_training_pxds(data_dir)
+    pub_text_dir = os.path.join(data_dir, "TrainingPubText")
+
+    # Filter to PXDs with paper text
+    available = {}
+    for pxd, sdrf_path in pxd_files.items():
+        json_path = os.path.join(pub_text_dir, f"{pxd}_PubText.json")
+        if os.path.exists(json_path):
+            available[pxd] = sdrf_path
+
+    # Select diverse subset: pick PXDs with varied characteristics
+    # For now, take first N; user can also specify with --pxds flag
+    selected = dict(list(available.items())[:num_pxds])
+    print(f"Diagnose mode: {len(selected)} training PXDs (of {len(available)} available)")
+    print(f"PXDs: {list(selected.keys())}")
+    print(f"Ensemble runs: {ensemble}\n")
+
+    # Build fake SampleSubmission from training SDRFs
+    sample_rows = []
+    all_solution_rows = []
+    row_id = 0
+
+    for pxd, sdrf_path in selected.items():
+        df = pd.read_csv(sdrf_path, sep='\t')
+        data_file_col = None
+        for c in df.columns:
+            if 'data file' in c.lower():
+                data_file_col = c
+                break
+        if data_file_col is None:
+            print(f"  WARNING: {pxd} has no data file column, skipping")
+            continue
+
+        raw_files = df[data_file_col].dropna().unique()
+        for rf in raw_files:
+            sample_rows.append({
+                'ID': str(row_id),
+                'PXD': pxd,
+                'Raw Data File': rf,
+            })
+            row_id += 1
+
+        solution_df = convert_training_sdrf_to_submission(sdrf_path, pxd)
+        all_solution_rows.append(solution_df)
+
+    # Write temporary sample submission
+    tmp_sample = os.path.join(data_dir, "_tmp_diag_sample.csv")
+    with open(tmp_sample, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=SUBMISSION_COLS)
+        writer.writeheader()
+        for row in sample_rows:
+            out = {c: "Not Applicable" for c in SUBMISSION_COLS}
+            out.update(row)
+            writer.writerow(out)
+
+    # Run pipeline
+    tmp_output = os.path.join(data_dir, "_tmp_diag_output.csv")
+    print("Running pipeline on training PXDs...\n")
+    run_pipeline(
+        data_dir=data_dir,
+        sample_sub_path=tmp_sample,
+        output_path=tmp_output,
+        model_ids=models,
+        paper_dir=pub_text_dir,
+        ensemble_runs=ensemble,
+    )
+
+    # Score
+    solution_combined = pd.concat(all_solution_rows, ignore_index=True)
+    solution_combined = solution_combined.fillna("Not Applicable")
+    submission_df = pd.read_csv(tmp_output)
+
+    eval_df, overall_f1 = run_scorer(solution_combined, submission_df, 'ID')
+
+    # ── Detailed report ──
+    print(f"\n{'='*80}")
+    print(f"  DIAGNOSE RESULTS: Overall F1 = {overall_f1:.4f}")
+    print(f"  ({len(eval_df)} evaluated (PXD, column) pairs)")
+    print(f"{'='*80}\n")
+
+    # Per-PXD summary
+    print("PER-PXD SCORES:")
+    pxd_scores = eval_df.groupby('pxd')['f1'].mean().sort_values()
+    for pxd, f1 in pxd_scores.items():
+        print(f"  {f1:.3f}  {pxd}")
+
+    # Per-column (worst first)
+    print(f"\nPER-COLUMN AVERAGE F1 (worst first):")
+    col_scores = eval_df.groupby('AnnotationType')['f1'].mean().sort_values()
+    for col, f1 in col_scores.items():
+        marker = " <<<" if f1 < 0.5 else (" **" if f1 < 0.8 else "")
+        print(f"  {f1:.3f}  {col}{marker}")
+
+    # ── Value diffs for worst columns ──
+    print(f"\n{'='*80}")
+    print("  VALUE DIFFS FOR WORST (PXD, COLUMN) PAIRS (F1 < 0.8)")
+    print(f"{'='*80}\n")
+
+    sol_dict = load_sdrf(solution_combined)
+    sub_dict = load_sdrf(submission_df)
+
+    worst_pairs = eval_df[eval_df['f1'] < 0.8].sort_values('f1')
+    for _, row in worst_pairs.iterrows():
+        pxd = row['pxd']
+        col = row['AnnotationType']
+        f1 = row['f1']
+        precision = row['precision']
+        recall = row['recall']
+
+        gold_vals = set(sol_dict.get(pxd, {}).get(col, []))
+        pred_vals = set(sub_dict.get(pxd, {}).get(col, []))
+
+        missing = gold_vals - pred_vals  # in gold but not in prediction
+        extra = pred_vals - gold_vals    # in prediction but not in gold
+
+        print(f"  {pxd} | {col} | F1={f1:.3f} (P={precision:.3f}, R={recall:.3f})")
+        if missing:
+            print(f"    MISSING (gold only): {sorted(missing)}")
+        if extra:
+            print(f"    EXTRA (pred only):   {sorted(extra)}")
+        common = gold_vals & pred_vals
+        if common:
+            print(f"    MATCHED:             {sorted(common)}")
+        print()
+
+    # Cleanup
+    for tmp in [tmp_sample, tmp_output]:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+    return eval_df, overall_f1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Local SDRF evaluation")
     parser.add_argument("--data_dir", required=True)
-    parser.add_argument("--mode", choices=["fast", "full", "priors"], default="fast")
+    parser.add_argument("--mode", choices=["fast", "full", "priors", "diagnose"], default="fast")
     parser.add_argument("--num-pxds", type=int, default=0, help="Limit number of PXDs (0=all)")
     parser.add_argument("--models", nargs="+", default=None)
     parser.add_argument("--output", default=None, help="Save eval CSV")
+    parser.add_argument("--ensemble", type=int, default=1, help="Ensemble runs for diagnose mode")
+    parser.add_argument("--pxds", nargs="+", default=None, help="Specific PXDs to evaluate")
     args = parser.parse_args()
 
     if args.mode == "fast":
@@ -469,6 +617,9 @@ if __name__ == "__main__":
     elif args.mode == "full":
         n = args.num_pxds or 5
         eval_df, f1 = run_full_evaluation(args.data_dir, n, args.models)
+    elif args.mode == "diagnose":
+        n = args.num_pxds or 3
+        eval_df, f1 = run_diagnose(args.data_dir, n, args.models, args.ensemble)
 
     if args.output and 'eval_df' in dir():
         eval_df.to_csv(args.output, index=False)

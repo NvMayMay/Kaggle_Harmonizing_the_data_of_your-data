@@ -17,6 +17,8 @@ def load_sdrf(sdrf_df: pd.DataFrame) -> Dict[str, Dict[str, List[str]]]:
     for pxd, pxd_df in sdrf_df.groupby('PXD'):
         sdrf_dict[pxd] = {}
         for col in pxd_df.columns:
+            if col in ['Raw Data File', 'Usage', 'PXD']:
+                continue
             uniq = pd.Series(pxd_df[col]).dropna().astype(str).unique().tolist()
             if uniq == ['Not Applicable']:
                 continue
@@ -27,7 +29,13 @@ def load_sdrf(sdrf_df: pd.DataFrame) -> Dict[str, Dict[str, List[str]]]:
                     values.append(parts[0].replace('NT=', '').strip() if parts else v.strip())
                 else:
                     values.append(v.strip())
-            sdrf_dict[pxd][col] = values
+            # Strip .1, .2, etc. suffixes from column names
+            if '.' in col:
+                col = col.split('.')[0].strip()
+            if col in sdrf_dict[pxd]:
+                sdrf_dict[pxd][col] += values  # append to existing list
+            else:
+                sdrf_dict[pxd][col] = values
     return sdrf_dict
 
 def Harmonize_and_Evaluate_datasets(A, B, threshold=0.80, CompleteAbsence=float('nan')):
@@ -38,9 +46,9 @@ def Harmonize_and_Evaluate_datasets(A, B, threshold=0.80, CompleteAbsence=float(
     common_pubs = set(A) & set(B)
     for pub in common_pubs:
         harmonized_A[pub], harmonized_B[pub] = {}, {}
-        for category in (set(A[pub]) & set(B[pub])):
+        for category in set(A[pub]):
             vals_A = list(dict.fromkeys(A[pub][category]))
-            vals_B = list(dict.fromkeys(B[pub][category]))
+            vals_B = list(dict.fromkeys(B[pub].get(category, [])))
             all_vals = vals_A + [v for v in vals_B if v not in vals_A]
             if len(vals_A) == 0 and len(vals_B) == 0:
                 harmA, harmB = [], []
